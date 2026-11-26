@@ -9,6 +9,14 @@
     "ios": {
       "supportsTablet": true
     },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Permitir que o SpeedPulse use sua localização para identificar a cidade dos testes."
+        }
+      ]
+    ],
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",

@@ -34,6 +34,31 @@ export const EMPTY_METRICS: TestMetrics = {
   uploadMbps: null,
 };
 
+export function normalizeHistoryItem(value: unknown): SpeedHistoryItem | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const item = value as Partial<SpeedHistoryItem>;
+  if (typeof item.id !== 'string' || typeof item.dateTime !== 'string') return null;
+
+  const numberOrNull = (input: unknown) =>
+    typeof input === 'number' && Number.isFinite(input) ? input : null;
+
+  return {
+    id: item.id,
+    dateTime: item.dateTime,
+    ip: typeof item.ip === 'string' ? item.ip : 'IP indisponível',
+    city: typeof item.city === 'string' ? item.city : 'Cidade indisponível',
+    coordsLabel: typeof item.coordsLabel === 'string' ? item.coordsLabel : undefined,
+    pingMs: numberOrNull(item.pingMs),
+    jitterMs: numberOrNull(item.jitterMs),
+    downloadMbps: numberOrNull(item.downloadMbps),
+    uploadMbps: numberOrNull(item.uploadMbps),
+    connection: item.connection && typeof item.connection.kind === 'string'
+      ? item.connection
+      : undefined,
+  };
+}
+
 const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
 const roundSpeed = (value: number) => Number(value.toFixed(1));
 

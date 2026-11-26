@@ -99,6 +99,10 @@ npx tsc --noEmit
 node --test speedMetrics.test.cjs
 ```
 
+### Acompanhar a execução
+
+Execute `npm start` e acompanhe no terminal do Expo ou no console do React Native DevTools as mensagens com prefixo `[SpeedPulse]`. Para abrir o DevTools, pressione `j` no terminal com o aplicativo em execução. Em desenvolvimento, os logs identificam ações, funções, fases, chamadas nativas, animações e amostras das transferências. Os logs de diagnóstico não incluem IP, cidade ou coordenadas; atualizações frequentes do velocímetro são limitadas a uma por segundo. Eles são desativados em builds de produção. Tipos TypeScript, como `TestPhase` e `InterfaceFilter`, são indicados nos eventos correspondentes, mas não são executados em tempo de execução. Os logs podem influenciar os resultados do teste de velocidade.
+
 Para adicionar uma dependência compatível com o SDK do projeto, use `npx expo install nome-do-pacote`. Para verificar as versões instaladas, use `npx expo install --check`.
 
 ### Se algo não funcionar

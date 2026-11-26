@@ -1,7 +1,8 @@
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, Defs, LinearGradient, Line, Path, Polyline, Stop } from 'react-native-svg';
 import type { SpeedSample } from './speedMetrics';
+import { debugLog } from './debugLog';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 const RADIUS = 92;
@@ -10,9 +11,15 @@ const ARC_PATH = 'M 18 105 A 92 92 0 0 1 202 105';
 
 export function SpeedGauge({ mbps, children }: { mbps: number; children: ReactNode }) {
   const [offset] = useState(() => new Animated.Value(ARC_LENGTH));
+  const lastLogTime = useRef(0);
   const fraction = Math.log10(1 + Math.min(Math.max(mbps, 0), 1000)) / Math.log10(1001);
 
   useEffect(() => {
+    const now = Date.now();
+    if (now - lastLogTime.current >= 1000) {
+      debugLog('SpeedGauge / Animated.timing / AnimatedPath', 'animando velocímetro', { fraction });
+      lastLogTime.current = now;
+    }
     const animation = Animated.timing(offset, {
       toValue: ARC_LENGTH * (1 - fraction),
       duration: 220,

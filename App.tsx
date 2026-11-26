@@ -19,9 +19,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo, { useNetInfo, type NetInfoState } from '@react-native-community/netinfo';
 import * as Location from 'expo-location';
 import { SpeedGauge, SpeedSparkline } from './SpeedCharts';
+import { debugLog } from './debugLog';
 import {
   EMPTY_METRICS, UNKNOWN_CONNECTION, createSpeedSampler, diagnose, filterHistory,
   formatMetric, formatSharedResult, speedMbps, summarizeHistory, summarizeLatency,
+  normalizeHistoryItem,
   type Connection, type InterfaceFilter, type OriginInfo, type SpeedHistoryItem,
   type SpeedSample, type TestMetrics,
 } from './speedMetrics';
@@ -87,26 +89,55 @@ export default function App() {
   const historyRef = useRef<SpeedHistoryItem[]>([]);
 
   useEffect(() => {
+    debugLog('App / SafeAreaView / FlatList / SpeedGauge', 'tela principal montada');
+  }, []);
+
+  useEffect(() => {
+    debugLog('App / TestPhase / Text', 'estado exibido atualizado', { phase, status: statusLabel });
+  }, [phase, statusLabel]);
+
+  useEffect(() => {
+    debugLog('App / useNetInfo', 'estado da rede atualizado', {
+      type: network.type,
+      isConnected: network.isConnected,
+    });
+  }, [network.type, network.isConnected]);
+
+  useEffect(() => {
     let active = true;
     const loadHistory = async () => {
+      debugLog('App / useEffect / loadHistory', 'AsyncStorage.getItem: iniciando leitura do histórico');
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         if (raw && active && historyRef.current.length === 0) {
-          const parsed: SpeedHistoryItem[] = JSON.parse(raw);
-          historyRef.current = parsed;
-          setHistory(parsed);
+          const parsed: unknown = JSON.parse(raw);
+          if (!Array.isArray(parsed)) throw new Error('Formato de histórico inválido');
+          const normalized = parsed
+            .map(normalizeHistoryItem)
+            .filter((item): item is SpeedHistoryItem => item !== null)
+            .slice(0, 20);
+          historyRef.current = normalized;
+          setHistory(normalized);
+          debugLog('loadHistory / FlatList', 'histórico carregado', { records: normalized.length, discarded: parsed.length - normalized.length });
+        } else {
+          debugLog('loadHistory / AsyncStorage', 'nenhum histórico aplicado', { found: !!raw, active });
         }
       } catch (err) {
         console.error('Erro ao carregar histórico:', err);
       }
     };
     loadHistory();
-    return () => { active = false; };
+    return () => {
+      active = false;
+      debugLog('App / useEffect', 'componente desmontado; leitura do histórico ignorará o resultado');
+    };
   }, []);
 
   const persistHistory = async (items: SpeedHistoryItem[]) => {
+    debugLog('persistHistory / AsyncStorage.setItem', 'salvando histórico', { records: items.length });
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+      debugLog('persistHistory / AsyncStorage.setItem', 'histórico salvo');
     } catch (err) {
       console.error('Erro ao salvar histórico:', err);
     }
@@ -114,39 +145,63 @@ export default function App() {
 
   const addHistoryRecord = async (record: SpeedHistoryItem) => {
     const updated = [record, ...historyRef.current].slice(0, 20);
+    debugLog('addHistoryRecord / FlatList', 'adicionando resultado ao histórico', { partial: record.uploadMbps === null, records: updated.length });
     historyRef.current = updated;
     setHistory(updated);
     await persistHistory(updated);
   };
 
   const clearHistory = async () => {
-    historyRef.current = [];
-    setHistory([]);
-    setCityFilter(null);
-    setInterfaceFilter('all');
-    try {
-      await AsyncStorage.removeItem(STORAGE_KEY);
-    } catch (err) {
-      console.error('Erro ao limpar histórico:', err);
-    }
+    debugLog('clearHistory / TouchableOpacity / Alert', 'solicitando confirmação para limpar o histórico');
+    Alert.alert(
+      'Limpar histórico',
+      'Todos os testes locais serão removidos.',
+      [
+        { text: 'Cancelar', style: 'cancel', onPress: () => debugLog('clearHistory / Alert', 'limpeza cancelada') },
+        {
+          text: 'Limpar',
+          style: 'destructive',
+          onPress: async () => {
+            debugLog('clearHistory / Alert / AsyncStorage.removeItem', 'limpeza confirmada');
+            historyRef.current = [];
+            setHistory([]);
+            setCityFilter(null);
+            setInterfaceFilter('all');
+            try {
+              await AsyncStorage.removeItem(STORAGE_KEY);
+              debugLog('clearHistory / AsyncStorage.removeItem', 'histórico removido');
+            } catch (err) {
+              console.error('Erro ao limpar histórico:', err);
+            }
+          },
+        },
+      ],
+    );
   };
 
   // Solicita permissão de localização no app e obtém cidade atual + coordenadas
   const fetchDeviceLocation = async (): Promise<{ city: string; coordsLabel?: string } | null> => {
     try {
+      debugLog('fetchDeviceLocation / Location.requestForegroundPermissionsAsync', 'solicitando permissão');
       const { status } = await Location.requestForegroundPermissionsAsync();
+      debugLog('fetchDeviceLocation / Location', 'permissão verificada', { status });
       if (status !== 'granted') {
+        debugLog('fetchDeviceLocation', 'localização indisponível; será usada a cidade estimada pelo IP');
         return null;
       }
 
+      debugLog('fetchDeviceLocation / Location.getCurrentPositionAsync', 'obtendo posição');
       const position = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
+      debugLog('fetchDeviceLocation / Location.getCurrentPositionAsync', 'posição obtida');
 
       const { latitude, longitude } = position.coords;
       const coordsLabel = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
 
+      debugLog('fetchDeviceLocation / Location.reverseGeocodeAsync', 'identificando cidade');
       const places = await Location.reverseGeocodeAsync({ latitude, longitude });
+      debugLog('fetchDeviceLocation / Location.reverseGeocodeAsync', 'consulta concluída', { results: places.length });
       const firstPlace = places[0];
       const city =
         firstPlace?.city ||
@@ -163,14 +218,16 @@ export default function App() {
 
   // Obtém IP público e usa localização do aparelho (com fallback para cidade do IP)
   const fetchOriginInfo = async (): Promise<OriginInfo> => {
-    const fetchJson = async (url: string) => {
+    const fetchJson = async (url: string, provider: string) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
+      debugLog('fetchOriginInfo / fetch', 'consultando provedor de IP', { provider, timeoutMs: 5000 });
       try {
         const res = await fetch(url, {
           signal: controller.signal,
           headers: { Accept: 'application/json' },
         });
+        debugLog('fetchOriginInfo / fetch', 'resposta recebida', { provider, status: res.status });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } finally {
@@ -182,22 +239,40 @@ export default function App() {
     let ipCity = 'Cidade indisponível';
 
     try {
-      const d1 = await fetchJson('https://ipwho.is/');
+      const d1 = await fetchJson('https://ipwho.is/', 'ipwho.is');
       if (d1 && d1.success !== false && d1.ip) {
         ip = d1.ip;
         ipCity = d1.city || 'Cidade indisponível';
       } else {
-        const d2 = await fetchJson('https://ipapi.co/json/');
+        debugLog('fetchOriginInfo / fetch', 'primeiro provedor não retornou um IP válido');
+      }
+    } catch (error) {
+      debugLog('fetchOriginInfo / fetch', 'primeiro provedor falhou; tentando alternativa', {
+        reason: error instanceof Error ? error.message : 'erro desconhecido',
+      });
+    }
+
+    if (ip === 'IP indisponível') {
+      try {
+        const d2 = await fetchJson('https://ipapi.co/json/', 'ipapi.co');
         if (d2 && d2.ip) {
           ip = d2.ip;
           ipCity = d2.city || 'Cidade indisponível';
+        } else {
+          debugLog('fetchOriginInfo / fetch', 'provedor alternativo não retornou um IP válido');
         }
+      } catch (error) {
+        debugLog('fetchOriginInfo / fetch', 'provedor alternativo falhou; IP indisponível', {
+          reason: error instanceof Error ? error.message : 'erro desconhecido',
+        });
       }
-    } catch {
-      // Mantém fallback do IP
     }
 
     const deviceLoc = await fetchDeviceLocation();
+    debugLog('fetchOriginInfo', 'origem identificada', {
+      ipAvailable: ip !== 'IP indisponível',
+      citySource: deviceLoc ? 'dispositivo' : ipCity !== 'Cidade indisponível' ? 'IP' : 'indisponível',
+    });
     if (deviceLoc) {
       return {
         ip,
@@ -214,6 +289,7 @@ export default function App() {
 
   useEffect(() => {
     if (phase === 'idle' || phase === 'done' || phase === 'error') {
+      debugLog('App / Animated.loop / Animated.View', 'iniciando animação de pulsação', { phase });
       const loop = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
@@ -233,16 +309,22 @@ export default function App() {
         ])
       );
       loop.start();
-      return () => loop.stop();
+      return () => {
+        loop.stop();
+        debugLog('App / Animated.loop / Animated.View', 'animação de pulsação interrompida', { phase });
+      };
     } else {
       pulseAnim.setValue(1);
+      debugLog('App / Animated.Value / Animated.View', 'pulsação redefinida durante o teste', { phase });
     }
   }, [phase, pulseAnim]);
 
   const measurePing = async () => {
     const samples: number[] = [];
+    debugLog('measurePing / fetch', 'iniciando medição de latência HTTP', { attempts: PING_ATTEMPTS });
 
     for (let i = 0; i < PING_ATTEMPTS; i++) {
+      debugLog('measurePing / fetch', 'iniciando tentativa', { attempt: i + 1 });
       setStatusLabel(`Medindo latência (${i + 1}/${PING_ATTEMPTS})...`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 2000);
@@ -256,7 +338,9 @@ export default function App() {
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         await response.arrayBuffer();
-        samples.push(performance.now() - start);
+        const elapsedMs = performance.now() - start;
+        samples.push(elapsedMs);
+        debugLog('measurePing / fetch', 'resposta válida', { attempt: i + 1, elapsedMs: Math.round(elapsedMs) });
       } catch (error) {
         console.warn(`Amostra de latência ${i + 1} sem resposta válida:`, error);
       } finally {
@@ -264,7 +348,10 @@ export default function App() {
       }
     }
 
-    return summarizeLatency(samples);
+    debugLog('measurePing / summarizeLatency', 'calculando ping e jitter', { validSamples: samples.length });
+    const latency = summarizeLatency(samples);
+    debugLog('measurePing / summarizeLatency', 'medição concluída', latency);
+    return latency;
   };
 
   const measureTransfer = (direction: Transfer): Promise<number> => {
@@ -273,10 +360,14 @@ export default function App() {
       const payload = isUpload ? new Uint8Array(5 * 1024 * 1024) : null;
       const xhr = new XMLHttpRequest();
       const startTime = performance.now();
-      const sample = createSpeedSampler(point => setTraces(previous => ({
-        ...previous,
-        [direction]: [...previous[direction], point],
-      })));
+      debugLog('measureTransfer / XMLHttpRequest', 'iniciando transferência', { direction, method: isUpload ? 'POST' : 'GET', timeoutMs: 15000 });
+      const sample = createSpeedSampler(point => {
+        debugLog('measureTransfer / createSpeedSampler / SpeedSparkline', 'amostra de velocidade', { direction, ...point });
+        setTraces(previous => ({
+          ...previous,
+          [direction]: [...previous[direction], point],
+        }));
+      });
 
       xhr.timeout = 15000;
       xhr.open(isUpload ? 'POST' : 'GET', `${isUpload ? `${UPLOAD_URL}?` : `${DOWNLOAD_URL}&`}r=${Date.now()}`);
@@ -289,12 +380,15 @@ export default function App() {
       if (isUpload) {
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         if (xhr.upload) xhr.upload.onprogress = onProgress;
+        debugLog('measureTransfer / XMLHttpRequest.upload', 'monitoramento de progresso configurado', { available: !!xhr.upload });
       } else {
         xhr.responseType = 'arraybuffer';
         xhr.onprogress = onProgress;
+        debugLog('measureTransfer / XMLHttpRequest.onprogress', 'monitoramento de progresso configurado');
       }
 
       xhr.onload = () => {
+        debugLog('measureTransfer / XMLHttpRequest.onload', 'resposta recebida', { direction, status: xhr.status });
         if (xhr.status < 200 || xhr.status >= 300) {
           reject(new Error(`${direction.toUpperCase()} HTTP ${xhr.status}`));
           return;
@@ -306,22 +400,34 @@ export default function App() {
         }
         const elapsedMs = performance.now() - startTime;
         const avgMbps = speedMbps(bytes, elapsedMs);
+        debugLog('measureTransfer / speedMbps', 'transferência concluída', { direction, bytes, elapsedMs: Math.round(elapsedMs), avgMbps });
         sample(bytes, elapsedMs, true);
         setLiveSpeed(avgMbps);
         resolve(avgMbps);
       };
 
-      xhr.onerror = () => reject(new Error(`Falha de rede no ${direction}`));
-      xhr.ontimeout = () => reject(new Error(`Tempo limite excedido no ${direction}`));
+      xhr.onerror = () => {
+        debugLog('measureTransfer / XMLHttpRequest.onerror', 'falha de rede', { direction });
+        reject(new Error(`Falha de rede no ${direction}`));
+      };
+      xhr.ontimeout = () => {
+        debugLog('measureTransfer / XMLHttpRequest.ontimeout', 'tempo limite excedido', { direction });
+        reject(new Error(`Tempo limite excedido no ${direction}`));
+      };
       if (payload) xhr.send(payload);
       else xhr.send();
     });
   };
 
   const runFullSpeedTest = async () => {
-    if (isRunningRef.current) return;
+    if (isRunningRef.current) {
+      debugLog('runFullSpeedTest / TouchableOpacity', 'ação ignorada; teste já em execução');
+      return;
+    }
     isRunningRef.current = true;
+    debugLog('runFullSpeedTest / TouchableOpacity', 'teste iniciado');
 
+    debugLog('runFullSpeedTest / TestPhase', 'preparando teste', { phase: 'preparing' });
     setPhase('preparing');
     setErrorDetail(null);
     setLiveSpeed(0);
@@ -347,31 +453,38 @@ export default function App() {
       setStatusLabel('Solicitando localização e identificando IP...');
       origin = await fetchOriginInfo();
       try {
+        debugLog('runFullSpeedTest / NetInfo.fetch', 'identificando tipo de conexão');
         connection = describeConnection(await NetInfo.fetch());
       } catch (error) {
         console.warn('Não foi possível atualizar o tipo de conexão:', error);
       }
+      debugLog('runFullSpeedTest / describeConnection', 'conexão identificada', { kind: connection.kind, label: connection.label });
       setTestConnection(connection);
 
+      debugLog('runFullSpeedTest / TestPhase', 'iniciando ping', { phase: 'ping' });
       setPhase('ping');
       result = { ...result, ...await measurePing() };
       setMetrics(result);
 
+      debugLog('runFullSpeedTest / TestPhase', 'iniciando download', { phase: 'download' });
       setPhase('download');
       setStatusLabel('Testando velocidade de download...');
       result = { ...result, downloadMbps: await measureTransfer('download') };
       setMetrics(result);
 
+      debugLog('runFullSpeedTest / TestPhase', 'iniciando upload', { phase: 'upload' });
       setPhase('upload');
       setStatusLabel('Testando velocidade de upload...');
       setLiveSpeed(0);
       result = { ...result, uploadMbps: await measureTransfer('upload') };
       setMetrics(result);
 
+      debugLog('runFullSpeedTest / TestPhase / diagnose', 'teste concluído', { phase: 'done', ...result });
       setPhase('done');
       setStatusLabel('Diagnóstico concluído');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Erro durante o teste';
+      debugLog('runFullSpeedTest / TestPhase', 'teste interrompido', { phase: 'error', reason: msg, ...result });
       setPhase('error');
       setStatusLabel('Teste interrompido');
       setErrorDetail(msg);
@@ -385,12 +498,15 @@ export default function App() {
         connection,
       });
       isRunningRef.current = false;
+      debugLog('runFullSpeedTest', 'fluxo finalizado; novo teste disponível');
     }
   };
 
   const shareResult = async (item: SpeedHistoryItem) => {
+    debugLog('shareResult / TouchableOpacity / Share.share', 'abrindo compartilhamento');
     try {
-      await Share.share({ title: 'Resultado SpeedPulse', message: formatSharedResult(item) });
+      const result = await Share.share({ title: 'Resultado SpeedPulse', message: formatSharedResult(item) });
+      debugLog('shareResult / Share.share', 'compartilhamento encerrado', { action: result.action });
     } catch (error) {
       console.warn('Erro ao compartilhar o teste:', error);
       Alert.alert('Compartilhamento indisponível', 'Não foi possível abrir o compartilhamento.');
@@ -556,14 +672,23 @@ export default function App() {
           <View style={styles.filters}>
             <View style={styles.filterRow}>
               {INTERFACE_FILTERS.map(({ value, label }) => (
-                <FilterChip key={value} label={label} selected={interfaceFilter === value} onPress={() => setInterfaceFilter(value)} />
+                <FilterChip key={value} label={label} selected={interfaceFilter === value} onPress={() => {
+                  debugLog('FilterChip / TouchableOpacity / InterfaceFilter', 'filtro de rede selecionado', { value });
+                  setInterfaceFilter(value);
+                }} />
               ))}
             </View>
             {cities.length > 0 && (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.cityChips}>
-                <FilterChip label="Todas as cidades" selected={selectedCity === null} onPress={() => setCityFilter(null)} />
+                <FilterChip label="Todas as cidades" selected={selectedCity === null} onPress={() => {
+                  debugLog('FilterChip / TouchableOpacity', 'filtro de cidade removido');
+                  setCityFilter(null);
+                }} />
                 {cities.map(city => (
-                  <FilterChip key={city} label={city} selected={selectedCity === city} onPress={() => setCityFilter(city)} />
+                  <FilterChip key={city} label={city} selected={selectedCity === city} onPress={() => {
+                    debugLog('FilterChip / TouchableOpacity', 'filtro de cidade selecionado');
+                    setCityFilter(city);
+                  }} />
                 ))}
               </ScrollView>
             )}
